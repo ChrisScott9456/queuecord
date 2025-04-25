@@ -1,6 +1,6 @@
 {
 	"name": "queuecord",
-	"version": "1.0.0",
+	"version": "0.0.1",
 	"description": "A package to handle all your Discord audio streaming needs. (YouTube, Spotify, etc.)",
 	"homepage": "https://github.com/ChrisScott9456/queuecord#readme",
 	"bugs": {
@@ -15,9 +15,12 @@
 	"main": "build/index.js",
 	"scripts": {
 		"start": "tsc && node build/index.js",
-		"build": "tsc"
+		"build": "tsc",
+		"npm-publish": "npm version minor && npm publish"
 	},
 	"dependencies": {
+		"@discordjs/voice": "^0.18.0",
+		"discord.js": "^14.18.0",
 		"typescript": "^5.8.3"
 	}
 }

@@ -10,7 +10,8 @@
 		"target": "ESNext",
 		"sourceMap": true,
 		"lib": ["ESNext", "DOM"],
-		"skipLibCheck": true
+		"skipLibCheck": true,
+		"declaration": true
 	},
 	"include": ["src/**/*"]
 }

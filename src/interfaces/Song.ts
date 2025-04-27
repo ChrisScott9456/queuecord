@@ -1,3 +1,5 @@
+import { ChatInputCommandInteraction, GuildMember } from 'discord.js';
+
 /**
  * Represents a song with detailed metadata.
  */
@@ -131,4 +133,24 @@ export interface Song {
 	 * The duration of the song as a formatted string (e.g., "3:45").
 	 */
 	duration_string: string;
+
+	/**
+	 * The interaction that initiated adding the song to the queue.
+	 */
+	interaction: ChatInputCommandInteraction<'cached'>;
+
+	/**
+	 * Timestamp when the song started playing
+	 */
+	startTime?: number;
+
+	/**
+	 * @returns The elapsed time since the song started playing
+	 */
+	getElapsedTime?: () => number;
+
+	/**
+	 * @returns The remaining time in hh:mm:ss format
+	 */
+	getElapsedTimeString?: () => string;
 }

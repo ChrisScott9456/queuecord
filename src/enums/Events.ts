@@ -1,29 +1,33 @@
-import { AudioPlayerStatus } from '@discordjs/voice';
 import { Song } from '../interfaces/Song';
 
 /**
  * Custom enums for QueueCord events.
  */
-export enum CustomEvents {
+export enum QueueCordEvents {
 	Error = 'Error',
-	Test = 'Test',
+	Idle = 'Idle',
+	Paused = 'Paused',
+	Playing = 'Playing',
+	PlaylistAdded = 'PlaylistAdded',
+	Shuffled = 'Shuffled',
+	Skipped = 'Skipped',
+	SongAdded = 'SongAdded',
+	Stopped = 'Stopped',
+	Unpaused = 'Unpaused',
 }
 
 /**
- * Combined enum of AudioPlayerStatus and CustomEvents.
+ * Used for EventEmitter to restrict events to QueueCordEvents.
  */
-export const QueueCordEvents = {
-	...AudioPlayerStatus,
-	...CustomEvents,
-} as const;
-
-// The QueueCordEvents type is a union of all possible event names
-export type QueueCordEvents = {
-	[AudioPlayerStatus.Playing]: (song: Song) => void;
-	[AudioPlayerStatus.Idle]: () => void;
-	[AudioPlayerStatus.Paused]: () => void;
-	[AudioPlayerStatus.AutoPaused]: () => void;
-	[AudioPlayerStatus.Buffering]: () => void;
-	[CustomEvents.Error]: (error: Error) => void;
-	[CustomEvents.Test]: (...args: any[]) => void;
+export type QueueCordEventMap = {
+	[QueueCordEvents.Error]: (error: Error) => void;
+	[QueueCordEvents.Idle]: () => void;
+	[QueueCordEvents.Paused]: (song: Song) => void;
+	[QueueCordEvents.Playing]: (song: Song) => void;
+	[QueueCordEvents.PlaylistAdded]: (playlist: Song[]) => void;
+	[QueueCordEvents.Shuffled]: (queue: Song[]) => void;
+	[QueueCordEvents.Skipped]: (song: Song) => void;
+	[QueueCordEvents.SongAdded]: (song: Song) => void;
+	[QueueCordEvents.Stopped]: (song: Song) => void;
+	[QueueCordEvents.Unpaused]: (song: Song) => void;
 };

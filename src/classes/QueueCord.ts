@@ -6,22 +6,64 @@ import { EventEmitter } from 'events';
 import { Readable } from 'stream';
 import { isValidURL } from '../utils/isValidURL';
 import { ChatInputCommandInteraction, VoiceBasedChannel } from 'discord.js';
-import { QueueCordEventMap, QueueCordEvents } from '../enums/Events';
+import { Loop, QueueCordEventMap, QueueCordEvents } from '../enums/Events';
 import { Song } from '../interfaces/Song';
 import moment from 'moment';
 import { isPlaylist } from '../utils/isPlaylist';
 
 const execAsync = promisify(exec);
 
+/**
+ * The `QueueCord` class is a music queue manager for Discord bots, extending `EventEmitter`.
+ * It provides functionality for managing a music queue, playing audio in voice channels,
+ * handling playlists, shuffling, skipping, pausing, and resuming playback, as well as
+ * maintaining a history of played songs.
+ *
+ * ### Features:
+ * - Joins and manages voice channel connections.
+ * - Plays audio from YouTube using `yt-dlp`.
+ * - Handles single songs and playlists.
+ * - Supports queue management (add, shuffle, skip, stop).
+ * - Maintains a history of played songs with a configurable limit.
+ * - Emits events for state changes and errors.
+ *
+ * ### Events:
+ * - `QueueCordEvents.Playing`: Emitted when a song starts playing.
+ * - `QueueCordEvents.Paused`: Emitted when playback is paused.
+ * - `QueueCordEvents.Unpaused`: Emitted when playback is resumed.
+ * - `QueueCordEvents.Stopped`: Emitted when playback is stopped.
+ * - `QueueCordEvents.Skipped`: Emitted when a song is skipped.
+ * - `QueueCordEvents.Previous`: Emitted when the previous song is played.
+ * - `QueueCordEvents.Shuffled`: Emitted when the queue is shuffled.
+ * - `QueueCordEvents.SongAdded`: Emitted when a song is added to the queue.
+ * - `QueueCordEvents.PlaylistAdded`: Emitted when a playlist is added to the queue.
+ * - `QueueCordEvents.Idle`: Emitted when the queue is empty or playback is idle.
+ * - `QueueCordEvents.Error`: Emitted when an error occurs.
+ *
+ * ### Usage:
+ * ```typescript
+ * const queueCord = new QueueCord();
+ * await queueCord.addToQueue('song_url_or_query', interaction);
+ * queueCord.play(voiceChannel);
+ * ```
+ *
+ * @class QueueCord
+ * @extends EventEmitter
+ * @param {number} [historyLimit=10] - The maximum number of songs to keep in the history stack. (default: 10)
+ */
 export class QueueCord extends EventEmitter {
 	private connection: VoiceConnection;
 	private player: AudioPlayer = createAudioPlayer();
 	private queue: Song[] = []; // Update queue to use Song interface
 	private state: QueueCordEvents = QueueCordEvents.Idle; // Idle by default
 	private currentSong: Song = null; // Current song being played
+	private history: Song[] = []; // Stack to store previously played songs
+	private historyLimit = 10; // Limit the size of the history stack
+	private loopMode: Loop = Loop.Disabled; // Loop mode for the queue
 
-	constructor() {
+	constructor(historyLimit?: number) {
 		super();
+		this.historyLimit = historyLimit; // Set the history limit
 	}
 
 	/**
@@ -196,8 +238,21 @@ export class QueueCord extends EventEmitter {
 		 * If the queue is empty, emit an Idle event.
 		 */
 		this.player.once(AudioPlayerStatus.Idle, async () => {
-			this.queue.shift(); // Remove the current song from the queue
+			// Only remove the current song if it's not the previous song
+			if (this.state !== QueueCordEvents.Previous) {
+				// Add the finished song to history
+				this.history.push(this.currentSong);
+
+				// Remove the oldest song if history exceeds the limit
+				if (this.history.length > this.historyLimit) {
+					this.history.shift();
+				}
+
+				this.queue.shift();
+			}
+
 			this.emitState(QueueCordEvents.Idle);
+
 			if (this.queue.length > 0) {
 				await this.play(vc); // Play the next song
 			} else {
@@ -247,10 +302,11 @@ export class QueueCord extends EventEmitter {
 		this.emit(QueueCordEvents.Shuffled, this.queue);
 	}
 
-	public skip(position?: number): void {
+	public skip(position?: number): QueueCordEvents {
 		// Stop the current song if it's the only one in the queue
 		if (this.queue.length === 1) {
-			return this.stop();
+			this.stop();
+			return QueueCordEvents.Stopped;
 		}
 
 		if (position) {
@@ -266,7 +322,7 @@ export class QueueCord extends EventEmitter {
 
 		// Set the player to Idle so the next song plays
 		this.player.emit(AudioPlayerStatus.Idle);
-		this.emitState(QueueCordEvents.Idle);
+		return QueueCordEvents.Skipped;
 	}
 
 	public stop(): void {
@@ -275,6 +331,41 @@ export class QueueCord extends EventEmitter {
 		this.currentSong = null;
 		this.player.stop();
 		this.emitState(QueueCordEvents.Idle);
+	}
+
+	/**
+	 * Plays the previous song from the history stack.
+	 * If no previous song exists, it does nothing.
+	 */
+	public async previous(): Promise<void> {
+		const previousSong = this.history.pop(); // Get the last played song
+
+		if (!previousSong) {
+			throw new Error('No previous song available');
+			return;
+		}
+
+		this.queue.unshift(previousSong); // Add the current song back to the queue
+
+		this.emitState(QueueCordEvents.Previous, this.currentSong, previousSong);
+		this.currentSong = previousSong; // Set the current song to the previous one
+
+		// Set the player to Idle so the next song plays
+		this.player.emit(AudioPlayerStatus.Idle);
+	}
+
+	/**
+	 * Cycles through the loop modes
+	 * - Disabled --> Song --> Queue
+	 */
+	public async loop() {
+		this.loopMode++; // Increment the loop mode
+
+		if (this.loopMode > 2) {
+			this.loopMode = 0; // Reset to no loop
+		}
+
+		return this.loopMode; // Return the current loop mode
 	}
 
 	/**

@@ -14,42 +14,58 @@ import { isPlaylist } from '../utils/isPlaylist';
 const execAsync = promisify(exec);
 
 /**
- * The `QueueCord` class is a music queue manager for Discord bots, extending `EventEmitter`.
- * It provides functionality for managing a music queue, playing audio in voice channels,
- * handling playlists, shuffling, skipping, pausing, and resuming playback, as well as
- * maintaining a history of played songs.
+ * The `QueueCord` class is a music queue and playback manager for Discord bots.
+ * It extends `EventEmitter` to handle various playback and queue-related events.
  *
  * ### Features:
- * - Joins and manages voice channel connections.
- * - Plays audio from YouTube using `yt-dlp`.
- * - Handles single songs and playlists.
- * - Supports queue management (add, shuffle, skip, stop).
+ * - Manages a queue of songs or playlists.
+ * - Supports playback control (play, pause, skip, stop, previous).
+ * - Handles loop modes (disabled, song, queue).
  * - Maintains a history of played songs with a configurable limit.
- * - Emits events for state changes and errors.
+ * - Emits events for state changes and queue updates.
+ * - Integrates with Discord voice channels for audio playback.
+ * - Supports adding songs or playlists via URLs or search queries.
+ * - Provides shuffle functionality for the queue.
  *
  * ### Events:
  * - `QueueCordEvents.Playing`: Emitted when a song starts playing.
  * - `QueueCordEvents.Paused`: Emitted when playback is paused.
  * - `QueueCordEvents.Unpaused`: Emitted when playback is resumed.
- * - `QueueCordEvents.Stopped`: Emitted when playback is stopped.
  * - `QueueCordEvents.Skipped`: Emitted when a song is skipped.
- * - `QueueCordEvents.Previous`: Emitted when the previous song is played.
- * - `QueueCordEvents.Shuffled`: Emitted when the queue is shuffled.
+ * - `QueueCordEvents.Stopped`: Emitted when playback is stopped.
+ * - `QueueCordEvents.Idle`: Emitted when the queue is empty or playback ends.
  * - `QueueCordEvents.SongAdded`: Emitted when a song is added to the queue.
  * - `QueueCordEvents.PlaylistAdded`: Emitted when a playlist is added to the queue.
- * - `QueueCordEvents.Idle`: Emitted when the queue is empty or playback is idle.
+ * - `QueueCordEvents.Shuffled`: Emitted when the queue is shuffled.
+ * - `QueueCordEvents.Previous`: Emitted when the previous song is played.
  * - `QueueCordEvents.Error`: Emitted when an error occurs.
  *
  * ### Usage:
+ * 1. Create an instance of `QueueCord`.
+ * 2. Use `addToQueue` to add songs or playlists.
+ * 3. Call `play` to start playback in a voice channel.
+ * 4. Use methods like `pause`, `skip`, `stop`, `previous`, and `shuffle` to control playback.
+ * 5. Listen to events to handle state changes or errors.
+ *
+ * ### Example:
  * ```typescript
  * const queueCord = new QueueCord();
- * await queueCord.addToQueue('song_url_or_query', interaction);
- * queueCord.play(voiceChannel);
- * ```
  *
- * @class QueueCord
- * @extends EventEmitter
- * @param {number} [historyLimit=10] - The maximum number of songs to keep in the history stack. (default: 10)
+ * // Add a song to the queue
+ * await queueCord.addToQueue('https://www.youtube.com/watch?v=dQw4w9WgXcQ', interaction);
+ *
+ * // Play the queue in a voice channel
+ * await queueCord.play(voiceChannel);
+ *
+ * // Pause playback
+ * await queueCord.pause();
+ *
+ * // Skip to the next song
+ * queueCord.skip();
+ *
+ * // Stop playback and clear the queue
+ * queueCord.stop();
+ * ```
  */
 export class QueueCord extends EventEmitter {
 	private connection: VoiceConnection;
@@ -58,9 +74,16 @@ export class QueueCord extends EventEmitter {
 	private state: QueueCordEvents = QueueCordEvents.Idle; // Idle by default
 	private currentSong: Song = null; // Current song being played
 	private history: Song[] = []; // Stack to store previously played songs
-	private historyLimit = 10; // Limit the size of the history stack
+	private historyLimit = 100; // Limit the size of the history stack (affects Queue Loop Mode as well)
 	private loopMode: Loop = Loop.Disabled; // Loop mode for the queue
 
+	/**
+	 * Creates an instance of the `QueueCord` class.
+	 * @param {number} [historyLimit=100] - The maximum number of songs to store in the playback history.
+	 * - If the history exceeds this limit, the oldest songs will be removed to make room for new ones.
+	 * - This also affects the `Queue` Loop Mode.
+	 * - (default: 100)
+	 */
 	constructor(historyLimit?: number) {
 		super();
 		this.historyLimit = historyLimit; // Set the history limit
@@ -238,8 +261,8 @@ export class QueueCord extends EventEmitter {
 		 * If the queue is empty, emit an Idle event.
 		 */
 		this.player.once(AudioPlayerStatus.Idle, async () => {
-			// Only remove the current song if it's not the previous song
-			if (this.state !== QueueCordEvents.Previous) {
+			// Only remove the current song if it's not the previous song or if the loop mode is not set to Song
+			if (this.state !== QueueCordEvents.Previous && this.loopMode !== Loop.Song) {
 				// Add the finished song to history
 				this.history.push(this.currentSong);
 
@@ -257,6 +280,12 @@ export class QueueCord extends EventEmitter {
 				await this.play(vc); // Play the next song
 			} else {
 				this.currentSong = null; // No more songs in the queue
+
+				// Add the history to the queue if loop mode is set to Queue
+				if (this.loopMode === Loop.Queue) {
+					this.queue.push(...this.history);
+					await this.play(vc); // Play the next song
+				}
 			}
 		});
 	}
@@ -328,6 +357,8 @@ export class QueueCord extends EventEmitter {
 	public stop(): void {
 		this.emit(QueueCordEvents.Stopped, this.currentSong);
 		this.queue = [];
+		this.history = [];
+		this.loopMode = Loop.Disabled;
 		this.currentSong = null;
 		this.player.stop();
 		this.emitState(QueueCordEvents.Idle);
@@ -359,10 +390,18 @@ export class QueueCord extends EventEmitter {
 	 * - Disabled --> Song --> Queue
 	 */
 	public async loop() {
-		this.loopMode++; // Increment the loop mode
-
-		if (this.loopMode > 2) {
-			this.loopMode = 0; // Reset to no loop
+		switch (this.loopMode) {
+			case Loop.Disabled:
+				this.loopMode = Loop.Song; // Set loop mode to Song
+				break;
+			case Loop.Song:
+				this.loopMode = Loop.Queue; // Set loop mode to Queue
+				break;
+			case Loop.Queue:
+				this.loopMode = Loop.Disabled; // Set loop mode to Disabled
+				break;
+			default:
+				this.loopMode = Loop.Disabled; // Fallback to Disabled if an unknown state is encountered
 		}
 
 		return this.loopMode; // Return the current loop mode
@@ -397,6 +436,13 @@ export class QueueCord extends EventEmitter {
 	 */
 	public setState(value: QueueCordEvents) {
 		this.state = value;
+	}
+
+	/**
+	 * Retrieves the current loop mode of the queue.
+	 */
+	public getLoop(): Loop {
+		return this.loopMode; // Return the current loop mode
 	}
 
 	/**

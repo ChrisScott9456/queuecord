@@ -42,7 +42,7 @@ export type QueueCordEventMap = {
  * - `Queue`: The entire queue will loop continuously.
  */
 export enum Loop {
-	Disabled = 0,
-	Song = 1,
-	Queue = 2,
+	Disabled = 'Disabled',
+	Song = 'Song',
+	Queue = 'Queue',
 }

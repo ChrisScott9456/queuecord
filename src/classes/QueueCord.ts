@@ -104,6 +104,16 @@ export class QueueCord extends EventEmitter {
 	}
 
 	/**
+	 * Cleans up the voice connection and frees up resources.
+	 */
+	private cleanConnection() {
+		if (!this.connection) return;
+
+		this.connection.destroy();
+		this.connection = null;
+	}
+
+	/**
 	 * Joins a voice channel if not already connected.
 	 * @param channel The voice channel to join.
 	 */
@@ -123,18 +133,25 @@ export class QueueCord extends EventEmitter {
 		this.connection.subscribe(this.player);
 
 		this.connection.on(VoiceConnectionStatus.Disconnected, () => {
-			this.connection.destroy(); // Clean up connection if disconnected
-			this.connection = null;
+			this.cleanConnection();
 		});
 
 		this.connection.on('error', (error) => {
 			console.error('Voice connection error:', error);
-			this.connection.destroy();
-			this.connection = null;
+			this.cleanConnection();
 
 			// Emit error event
 			this.emit(QueueCordEvents.Error, error);
 		});
+	}
+
+	async leaveChannel() {
+		if (!this.connection || this.connection.state.status === VoiceConnectionStatus.Disconnected) {
+			return; // Not connected to a voice channel
+		}
+
+		this.connection.disconnect(); // Leave the voice channel
+		this.cleanConnection();
 	}
 
 	/**
@@ -167,27 +184,36 @@ export class QueueCord extends EventEmitter {
 	 */
 	async addPlaylist(playlistUrl: string, interaction: ChatInputCommandInteraction<'cached'>, shuffle: boolean) {
 		// Fetch playlist metadata
-		const { stdout } = await execAsync(`yt-dlp --dump-single-json --flat-playlist --skip-download "${playlistUrl}"`);
+		const { stdout } = await execAsync(`yt-dlp --cookies /app/config/cookies.txt --dump-single-json --flat-playlist --skip-download "${playlistUrl}"`);
 		const playlistMetadata = JSON.parse(stdout);
 
 		const videoIds = playlistMetadata.entries.map((entry: any) => entry.id); // Extract video IDs
 
 		// Fetch metadata for each video in the playlist
-		const songs = await Promise.all(
-			videoIds.map((id) =>
-				extractMetadata(`https://www.youtube.com/watch?v=${id}`, interaction).then((song) => ({
-					...song,
-					playlist: playlistMetadata.title || song.playlist,
-					playlist_id: playlistMetadata.id || song.playlist_id,
-					playlist_title: playlistMetadata.title || song.playlist_title,
-					playlist_uploader: playlistMetadata.uploader || song.playlist_uploader,
-					playlist_uploader_id: playlistMetadata.uploader_id || song.playlist_uploader_id,
-					playlist_channel: playlistMetadata.channel || song.playlist_channel,
-					playlist_channel_id: playlistMetadata.channel_id || song.playlist_channel_id,
-					playlist_webpage_url: playlistMetadata.webpage_url || song.playlist_webpage_url,
-				}))
-			)
+		const results = await Promise.allSettled(
+			videoIds.map(async (id) => {
+				try {
+					const song = await extractMetadata(`https://www.youtube.com/watch?v=${id}`, interaction);
+					return {
+						...song,
+						playlist: playlistMetadata.title || song.playlist,
+						playlist_id: playlistMetadata.id || song.playlist_id,
+						playlist_title: playlistMetadata.title || song.playlist_title,
+						playlist_uploader: playlistMetadata.uploader || song.playlist_uploader,
+						playlist_uploader_id: playlistMetadata.uploader_id || song.playlist_uploader_id,
+						playlist_channel: playlistMetadata.channel || song.playlist_channel,
+						playlist_channel_id: playlistMetadata.channel_id || song.playlist_channel_id,
+						playlist_webpage_url: playlistMetadata.webpage_url || song.playlist_webpage_url,
+					};
+				} catch (err) {
+					console.warn(`Skipping unavailable track: ${id}`, err);
+					return null;
+				}
+			})
 		);
+
+		// Filter only successful results
+		const songs = results.filter((r): r is PromiseFulfilledResult<any> => r.status === 'fulfilled' && r.value).map((r) => r.value);
 
 		this.queue.push(...songs); // Add all Songs to the queue
 		if (shuffle) this.shuffle(); // Shuffle the queue if specified
@@ -233,7 +259,7 @@ export class QueueCord extends EventEmitter {
 		if (!this.currentSong) return;
 
 		// Use yt-dlp to extract audio stream
-		const process = spawn('yt-dlp', ['-f', 'bestaudio', '-o', '-', this.currentSong.webpage_url], { stdio: ['ignore', 'pipe', 'ignore'] });
+		const process = spawn('yt-dlp', ['--cookies', '/app/config/cookies.txt', '-f', 'bestaudio', '-o', '-', this.currentSong.webpage_url], { stdio: ['ignore', 'pipe', 'ignore'] });
 
 		// Create audio resource from yt-dlp output
 		const resource = createAudioResource(process.stdout as Readable);
@@ -462,7 +488,7 @@ export class QueueCord extends EventEmitter {
  * @returns A promise that resolves to a Song object.
  */
 async function extractMetadata(input: string, interaction: ChatInputCommandInteraction<'cached'>): Promise<Song> {
-	const { stdout } = await execAsync(`yt-dlp --dump-json --skip-download "${input}"`); // Using --dump-json gets ALL metadata
+	const { stdout } = await execAsync(`yt-dlp --cookies /app/config/cookies.txt --dump-json --skip-download "${input}"`); // Using --dump-json gets ALL metadata
 	const metadata = JSON.parse(stdout);
 
 	return {

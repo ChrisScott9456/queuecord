@@ -259,7 +259,9 @@ export class QueueCord extends EventEmitter {
 		if (!this.currentSong) return;
 
 		// Use yt-dlp to extract audio stream
-		const process = spawn('yt-dlp', ['--cookies', '/app/config/cookies.txt', '-f', 'bestaudio', '-o', '-', this.currentSong.webpage_url], { stdio: ['ignore', 'pipe', 'ignore'] });
+		const process = spawn('yt-dlp', ['-f', 'bestaudio', '-o', '-', this.currentSong.webpage_url], { stdio: ['ignore', 'pipe', 'pipe'] });
+		process.stderr.setEncoding('utf8');
+		process.stderr.on('data', (data) => console.warn('[yt-dlp]', String(data).trim()));
 
 		// Create audio resource from yt-dlp output
 		const resource = createAudioResource(process.stdout as Readable);
@@ -488,7 +490,7 @@ export class QueueCord extends EventEmitter {
  * @returns A promise that resolves to a Song object.
  */
 async function extractMetadata(input: string, interaction: ChatInputCommandInteraction<'cached'>): Promise<Song> {
-	const { stdout } = await execAsync(`yt-dlp --cookies /app/config/cookies.txt --dump-json --skip-download "${input}"`); // Using --dump-json gets ALL metadata
+	const { stdout } = await execAsync(`yt-dlp --dump-json --skip-download "${input}"`); // Using --dump-json gets ALL metadata
 	const metadata = JSON.parse(stdout);
 
 	return {

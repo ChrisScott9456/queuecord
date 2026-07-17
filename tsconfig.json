@@ -2,6 +2,7 @@
 	"compilerOptions": {
 		"strict": false,
 		"outDir": "build",
+		"rootDir": "src",
 		"allowJs": true,
 		"module": "NodeNext",
 		"moduleResolution": "NodeNext",

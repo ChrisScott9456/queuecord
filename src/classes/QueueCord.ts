@@ -1,9 +1,12 @@
-import { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, AudioPlayer, VoiceConnectionStatus } from '@discordjs/voice';
+import { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, AudioPlayer, VoiceConnectionStatus, entersState } from '@discordjs/voice';
 import { VoiceConnection } from '@discordjs/voice';
 import { spawn, exec } from 'child_process';
 import { promisify } from 'util';
 import { EventEmitter } from 'events';
 import { Readable } from 'stream';
+import fs from 'fs';
+import path from 'path';
+import { randomUUID } from 'crypto';
 import { isValidURL } from '../utils/isValidURL';
 import { ChatInputCommandInteraction, VoiceBasedChannel } from 'discord.js';
 import { Loop, QueueCordEventMap, QueueCordEvents } from '../enums/Events';
@@ -12,6 +15,40 @@ import moment from 'moment';
 import { isPlaylist } from '../utils/isPlaylist';
 
 const execAsync = promisify(exec);
+
+const COOKIES_PATH = '/app/config/cookies.txt';
+const COOKIES_DIR = path.dirname(COOKIES_PATH);
+
+// yt-dlp rewrites --cookies FILE in place after every run to persist rotated
+// session tokens. If a run is killed mid-write (e.g. a container restart),
+// that rewrite can truncate/corrupt the file for every other invocation.
+// To avoid that, each call gets its own scratch copy of the cookie jar and
+// only swaps it back into place once yt-dlp has exited successfully.
+function prepareCookiesJar(): string {
+	const jarPath = path.join(COOKIES_DIR, `.cookies-${randomUUID()}.txt`);
+	fs.copyFileSync(COOKIES_PATH, jarPath);
+	return jarPath;
+}
+
+function commitCookiesJar(jarPath: string, success: boolean) {
+	if (success) {
+		try {
+			fs.renameSync(jarPath, COOKIES_PATH);
+			return;
+		} catch (err) {
+			console.warn('Failed to commit updated cookies jar:', err);
+		}
+	}
+
+	fs.rmSync(jarPath, { force: true });
+}
+
+// Sweep any scratch jars left behind by a process that was killed mid-run.
+for (const file of fs.readdirSync(COOKIES_DIR)) {
+	if (file.startsWith('.cookies-') && file.endsWith('.txt')) {
+		fs.rmSync(path.join(COOKIES_DIR, file), { force: true });
+	}
+}
 
 /**
  * The `QueueCord` class is a music queue and playback manager for Discord bots.
@@ -87,6 +124,10 @@ export class QueueCord extends EventEmitter {
 	constructor(historyLimit?: number) {
 		super();
 		this.historyLimit = historyLimit; // Set the history limit
+
+		// Without this, a playback error emits 'error' on the AudioPlayer with no
+		// listener, which Node treats as an uncaught exception and crashes the process.
+		this.player.on('error', (err) => console.error('AudioPlayer error:', err));
 	}
 
 	/**
@@ -116,10 +157,11 @@ export class QueueCord extends EventEmitter {
 	/**
 	 * Joins a voice channel if not already connected.
 	 * @param channel The voice channel to join.
+	 * @returns `true` if the connection is ready to use, `false` if joining failed.
 	 */
-	async joinChannel(channel: VoiceBasedChannel) {
+	async joinChannel(channel: VoiceBasedChannel): Promise<boolean> {
 		if (this.connection && this.connection.state.status !== VoiceConnectionStatus.Disconnected) {
-			return; // Already connected to a voice channel
+			return true; // Already connected to a voice channel
 		}
 
 		// Joins the voice channel
@@ -128,6 +170,21 @@ export class QueueCord extends EventEmitter {
 			guildId: channel.guild.id,
 			adapterCreator: channel.guild.voiceAdapterCreator,
 		});
+
+		this.connection.on('stateChange', (oldState, newState) => {
+			console.log('[voice] connection state:', oldState.status, '->', newState.status);
+		});
+
+		// Wait for the connection to be Ready before subscribing, otherwise the
+		// AudioPlayer sees no ready subscriber and gets stuck in AutoPaused.
+		try {
+			await entersState(this.connection, VoiceConnectionStatus.Ready, 30_000);
+		} catch (err) {
+			console.error('Voice connection failed to become ready:', err);
+			this.cleanConnection();
+			this.emit(QueueCordEvents.Error, err);
+			return false;
+		}
 
 		// Subscribes to an audio player, allowing the player to play audio on this voice connection.
 		this.connection.subscribe(this.player);
@@ -143,6 +200,8 @@ export class QueueCord extends EventEmitter {
 			// Emit error event
 			this.emit(QueueCordEvents.Error, error);
 		});
+
+		return true;
 	}
 
 	async leaveChannel() {
@@ -184,7 +243,15 @@ export class QueueCord extends EventEmitter {
 	 */
 	async addPlaylist(playlistUrl: string, interaction: ChatInputCommandInteraction<'cached'>, shuffle: boolean) {
 		// Fetch playlist metadata
-		const { stdout } = await execAsync(`yt-dlp --cookies /app/config/cookies.txt --dump-single-json --flat-playlist --skip-download "${playlistUrl}"`);
+		const cookiesJar = prepareCookiesJar();
+		let stdout: string;
+		try {
+			({ stdout } = await execAsync(`yt-dlp --cookies ${cookiesJar} --dump-single-json --flat-playlist --skip-download "${playlistUrl}"`));
+			commitCookiesJar(cookiesJar, true);
+		} catch (err) {
+			commitCookiesJar(cookiesJar, false);
+			throw err;
+		}
 		const playlistMetadata = JSON.parse(stdout);
 
 		const videoIds = playlistMetadata.entries.map((entry: any) => entry.id); // Extract video IDs
@@ -259,15 +326,22 @@ export class QueueCord extends EventEmitter {
 		if (!this.currentSong) return;
 
 		// Use yt-dlp to extract audio stream
-		const process = spawn('yt-dlp', ['-f', 'bestaudio', '-o', '-', this.currentSong.webpage_url], { stdio: ['ignore', 'pipe', 'pipe'] });
+		const cookiesJar = prepareCookiesJar();
+		const process = spawn('yt-dlp', ['--cookies', cookiesJar, '-f', 'bestaudio', '-o', '-', this.currentSong.webpage_url], { stdio: ['ignore', 'pipe', 'pipe'] });
 		process.stderr.setEncoding('utf8');
 		process.stderr.on('data', (data) => console.warn('[yt-dlp]', String(data).trim()));
+		process.on('error', () => commitCookiesJar(cookiesJar, false));
+		process.on('close', (code) => commitCookiesJar(cookiesJar, code === 0));
 
 		// Create audio resource from yt-dlp output
 		const resource = createAudioResource(process.stdout as Readable);
 
 		// Join the channel and play the audio resource
-		await this.joinChannel(vc);
+		const joined = await this.joinChannel(vc);
+		if (!joined) {
+			process.kill();
+			return;
+		}
 		this.player.play(resource);
 
 		// Set the start time and elapsed time method on the current song
@@ -490,7 +564,15 @@ export class QueueCord extends EventEmitter {
  * @returns A promise that resolves to a Song object.
  */
 async function extractMetadata(input: string, interaction: ChatInputCommandInteraction<'cached'>): Promise<Song> {
-	const { stdout } = await execAsync(`yt-dlp --dump-json --skip-download "${input}"`); // Using --dump-json gets ALL metadata
+	const cookiesJar = prepareCookiesJar();
+	let stdout: string;
+	try {
+		({ stdout } = await execAsync(`yt-dlp --cookies ${cookiesJar} --dump-json --skip-download "${input}"`)); // Using --dump-json gets ALL metadata
+		commitCookiesJar(cookiesJar, true);
+	} catch (err) {
+		commitCookiesJar(cookiesJar, false);
+		throw err;
+	}
 	const metadata = JSON.parse(stdout);
 
 	return {
